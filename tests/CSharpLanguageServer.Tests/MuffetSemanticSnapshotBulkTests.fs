@@ -14,6 +14,44 @@ let ``muffet/semanticSnapshotBulk writes NDJSON response`` () =
     use client = activateFixture "genericProject"
     use classFile = client.Open "Project/Class.cs"
 
+    let requireProp (name: string) (o: JObject) : JToken =
+        match o.TryGetValue(name) with
+        | true, v ->
+            match Option.ofObj v with
+            | Some v -> v
+            | None -> failwithf "missing JSON field '%s'" name
+        | _ -> failwithf "missing JSON field '%s'" name
+
+    let asJObject (t: JToken) : JObject =
+        match t with
+        | :? JObject as o -> o
+        | _ -> failwithf "expected object JSON token, got %O" t.Type
+
+    let asJArray (t: JToken) : JArray =
+        match t with
+        | :? JArray as a -> a
+        | _ -> failwithf "expected array JSON token, got %O" t.Type
+
+    let asString (t: JToken) : string =
+        match t with
+        | :? JValue as v -> v.Value :?> string
+        | _ -> failwithf "expected string JSON token, got %O" t.Type
+
+    let asInt (t: JToken) : int =
+        match t with
+        | :? JValue as v -> Convert.ToInt32(v.Value)
+        | _ -> failwithf "expected int JSON token, got %O" t.Type
+
+    let asInt64 (t: JToken) : int64 =
+        match t with
+        | :? JValue as v -> Convert.ToInt64(v.Value)
+        | _ -> failwithf "expected int64 JSON token, got %O" t.Type
+
+    let asBool (t: JToken) : bool =
+        match t with
+        | :? JValue as v -> Convert.ToBoolean(v.Value)
+        | _ -> failwithf "expected bool JSON token, got %O" t.Type
+
     let requestPath = Path.Combine(client.SolutionDir, "muffet_semantic_snapshot_bulk.request.ndjson")
     let responsePath = Path.Combine(client.SolutionDir, "muffet_semantic_snapshot_bulk.response.ndjson")
 
@@ -61,42 +99,46 @@ let ``muffet/semanticSnapshotBulk writes NDJSON response`` () =
     Assert.AreEqual(1, lines.Length)
 
     let outLine = JObject.Parse(lines[0])
-    Assert.AreEqual(1L, outLine["requestId"].Value<int64>())
-    Assert.AreEqual(classFile.Uri, outLine["uri"].Value<string>())
+    Assert.AreEqual(1L, outLine |> requireProp "requestId" |> asInt64)
+    Assert.AreEqual(classFile.Uri, outLine |> requireProp "uri" |> asString)
 
-    let result = outLine["result"] :?> JObject
-    Assert.AreEqual(false, result["stale"].Value<bool>())
+    let result = outLine |> requireProp "result" |> asJObject
+    Assert.AreEqual(false, result |> requireProp "stale" |> asBool)
 
-    let defsByCallSite = result["defsByCallSite"] :?> JArray
+    let defsByCallSite = result |> requireProp "defsByCallSite" |> asJArray
     Assert.AreEqual(1, defsByCallSite.Count)
 
-    let defs0 = (defsByCallSite[0] :?> JObject)["defs"] :?> JArray
+    let defs0 =
+        defsByCallSite[0] |> asJObject |> requireProp "defs" |> asJArray
     Assert.IsTrue(defs0.Count >= 1)
 
     let hasMethodADef =
         defs0
         |> Seq.cast<JToken>
         |> Seq.exists (fun t ->
-            let loc = t :?> JObject
-            let range = loc["range"] :?> JObject
-            let start = range["start"] :?> JObject
-            loc["uri"].Value<string>() = classFile.Uri && start["line"].Value<int>() = 2)
+            let loc = t |> asJObject
+            let range = loc |> requireProp "range" |> asJObject
+            let start = range |> requireProp "start" |> asJObject
+            (loc |> requireProp "uri" |> asString) = classFile.Uri
+            && (start |> requireProp "line" |> asInt) = 2)
 
     Assert.IsTrue(hasMethodADef)
 
-    let defsByRefSite = result["defsByRefSite"] :?> JArray
+    let defsByRefSite = result |> requireProp "defsByRefSite" |> asJArray
     Assert.AreEqual(1, defsByRefSite.Count)
 
-    let refDefs0 = (defsByRefSite[0] :?> JObject)["defs"] :?> JArray
+    let refDefs0 =
+        defsByRefSite[0] |> asJObject |> requireProp "defs" |> asJArray
     Assert.IsTrue(refDefs0.Count >= 1)
 
     let hasArgParamDef =
         refDefs0
         |> Seq.cast<JToken>
         |> Seq.exists (fun t ->
-            let loc = t :?> JObject
-            let range = loc["range"] :?> JObject
-            let start = range["start"] :?> JObject
-            loc["uri"].Value<string>() = classFile.Uri && start["line"].Value<int>() = 7)
+            let loc = t |> asJObject
+            let range = loc |> requireProp "range" |> asJObject
+            let start = range |> requireProp "start" |> asJObject
+            (loc |> requireProp "uri" |> asString) = classFile.Uri
+            && (start |> requireProp "line" |> asInt) = 7)
 
     Assert.IsTrue(hasArgParamDef)

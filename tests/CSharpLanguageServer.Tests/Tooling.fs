@@ -15,6 +15,33 @@ open Newtonsoft.Json.Linq
 open Ionide.LanguageServerProtocol.Types
 open Ionide.LanguageServerProtocol.Server
 
+let dotnetHasSdkMajor (major: int) : bool =
+    try
+        let psi = ProcessStartInfo()
+        psi.FileName <- "dotnet"
+        psi.Arguments <- "--list-sdks"
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        psi.CreateNoWindow <- true
+
+        match Process.Start(psi) |> Option.ofObj with
+        | None -> false
+        | Some p ->
+            use p = p
+            let output = p.StandardOutput.ReadToEnd()
+            p.WaitForExit(5000) |> ignore
+
+            if p.ExitCode <> 0 then
+                false
+            else
+                output.Split([| '\n'; '\r' |], StringSplitOptions.RemoveEmptyEntries)
+                |> Array.exists (fun line ->
+                    let trimmed = line.Trim()
+                    trimmed.StartsWith(string major + ".", StringComparison.Ordinal))
+    with _ ->
+        false
+
 let indexJToken (name: string) (jobj: option<JToken>) : option<JToken> =
     jobj |> Option.bind (fun p -> p[name] |> Option.ofObj)
 
@@ -84,8 +111,8 @@ let defaultClientCapabilities =
                         { DynamicRegistration = None
                           IsPreferredSupport = None
                           DisabledSupport = None
-                          DataSupport = None
-                          ResolveSupport = None
+                          DataSupport = Some true
+                          ResolveSupport = Some { Properties = [| "edit" |] }
                           HonorsChangeAnnotations = None
                           CodeActionLiteralSupport = Some { CodeActionKind = { ValueSet = Array.empty } } } }
         Experimental = {| csharp = {| metadataUris = true |} |} |> serialize |> Some }

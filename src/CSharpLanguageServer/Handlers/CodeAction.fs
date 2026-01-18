@@ -49,6 +49,7 @@ module CodeAction =
             assemblies
             |> Seq.collect (fun a -> a.GetTypes())
             |> Seq.filter validType
+            |> Seq.sortBy (fun t -> t.FullName)
             |> Seq.toArray
 
         let isProviderType (t: Type) = t.IsAssignableTo(typeof<'ProviderType>)
@@ -284,34 +285,44 @@ module CodeAction =
             match maybeOps with
             | None -> return None
             | Some ops ->
-                let op = ops |> Seq.map (fun o -> o :?> ApplyChangesOperation) |> Seq.head
+                let op =
+                    ops
+                    |> Seq.choose (fun o ->
+                        match o with
+                        | :? ApplyChangesOperation as a -> Some a
+                        | _ -> None)
+                    |> Seq.tryHead
 
-                let! docTextEdit =
-                    lspDocChangesFromSolutionDiff
-                        ct
-                        wf
-                        originalSolution
-                        op.ChangedSolution
-                        tryGetDocVersionByUri
-                        originatingDoc
+                match op with
+                | None -> return None
+                | Some op ->
 
-                let edit: WorkspaceEdit =
-                    { Changes = None
-                      DocumentChanges = docTextEdit |> Seq.map U4.C1 |> Array.ofSeq |> Some
-                      ChangeAnnotations = None }
+                    let! docTextEdit =
+                        lspDocChangesFromSolutionDiff
+                            ct
+                            wf
+                            originalSolution
+                            op.ChangedSolution
+                            tryGetDocVersionByUri
+                            originatingDoc
 
-                let caKind, caIsPreferred = lspCodeActionDetailsFromRoslynCA ca
+                    let edit: WorkspaceEdit =
+                        { Changes = None
+                          DocumentChanges = docTextEdit |> Seq.map U4.C1 |> Array.ofSeq |> Some
+                          ChangeAnnotations = None }
 
-                return
-                    Some
-                        { Title = caTitle
-                          Kind = caKind
-                          Diagnostics = None
-                          Edit = Some edit
-                          Command = None
-                          Data = None
-                          IsPreferred = caIsPreferred
-                          Disabled = None }
+                    let caKind, caIsPreferred = lspCodeActionDetailsFromRoslynCA ca
+
+                    return
+                        Some
+                            { Title = caTitle
+                              Kind = caKind
+                              Diagnostics = None
+                              Edit = Some edit
+                              Command = None
+                              Data = None
+                              IsPreferred = caIsPreferred
+                              Disabled = None }
         }
 
     let provider (clientCapabilities: ClientCapabilities) : U2<bool, CodeActionOptions> option =
@@ -447,19 +458,17 @@ module CodeAction =
                     doc
                     ct
 
-            let! lspCodeAction =
-                match selectedCodeAction with
-                | Some(caTitle, ca) -> async {
-                    let! resolvedCA = toResolvedLspCodeAction caTitle ca
+            match selectedCodeAction with
+            | None -> return raise (Exception("no CodeAction resolved"))
+            | Some(caTitle, ca) ->
+                let! resolvedCA = toResolvedLspCodeAction caTitle ca
 
-                    if resolvedCA.IsNone then
-                        logger.LogError("handleCodeActionResolve: could not resolve {action} - null", ca)
-
-                    return resolvedCA.Value
-                  }
-                | None -> raise (Exception("no CodeAction resolved"))
-
-            return lspCodeAction |> LspResult.success
+                match resolvedCA with
+                | Some ca -> return ca |> LspResult.success
+                | None ->
+                    logger.LogError("handleCodeActionResolve: could not resolve {action}", caTitle)
+                    // Return the original unresolved CodeAction to avoid crashing the client.
+                    return p |> LspResult.success
 
         | _, _ -> return raise (Exception(sprintf "no document for uri %s" resolutionData.Value.TextDocumentUri))
     }

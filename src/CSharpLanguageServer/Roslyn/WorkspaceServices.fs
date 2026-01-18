@@ -15,6 +15,33 @@ open Microsoft.Extensions.Logging
 open CSharpLanguageServer.Logging
 open CSharpLanguageServer.Util
 
+module private DefaultReturnValue =
+    let private isTaskOfT (t: Type) =
+        t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<System.Threading.Tasks.Task<_>>
+
+    let private isValueTaskOfT (t: Type) =
+        t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<ValueTask<_>>
+
+    let private defaultLeafValue (t: Type) (defaultBool: bool) : obj | null =
+        if t = typeof<bool> then
+            box defaultBool
+        else if t.IsValueType then
+            Activator.CreateInstance(t)
+        else
+            null
+
+    let create (t: Type) (defaultBool: bool) : obj | null =
+        if t = typeof<Void> then
+            null
+        else if isTaskOfT t then
+            let inner = t.GenericTypeArguments[0]
+            Task.fromResult(inner, defaultLeafValue inner defaultBool)
+        else if isValueTaskOfT t then
+            let inner = t.GenericTypeArguments[0]
+            Activator.CreateInstance(t, defaultLeafValue inner defaultBool)
+        else
+            defaultLeafValue t defaultBool
+
 
 type CleanCodeGenerationOptionsProviderInterceptor(_logMessage) =
     interface IInterceptor with
@@ -45,7 +72,10 @@ type CleanCodeGenerationOptionsProviderInterceptor(_logMessage) =
                 invocation.ReturnValue <-
                     Activator.CreateInstance(valueTaskTypeForCleanCodeGenOptions, defaultCleanCodeGenOptions)
 
-            | _ -> NotImplementedException(string invocation.Method) |> raise
+            | _ ->
+                // Stay permissive: Roslyn service interfaces can change across versions and we prefer
+                // to keep headless behavior stable rather than fail hard on additional methods.
+                invocation.ReturnValue <- DefaultReturnValue.create invocation.Method.ReturnType false
 
 
 type CleanCodeGenOptionsProxy(logMessage) =
@@ -83,7 +113,10 @@ type LegacyWorkspaceOptionServiceInterceptor(logMessage) =
             | "get_GenerateOverrides" -> invocation.ReturnValue <- box true
             | "get_CleanCodeGenerationOptionsProvider" ->
                 invocation.ReturnValue <- CleanCodeGenOptionsProxy(logMessage).Create()
-            | _ -> NotImplementedException(string invocation.Method) |> raise
+            | _ ->
+                // Default to enabling behaviors (bool=true) and otherwise return a default value.
+                // Many Roslyn refactorings are option-gated; returning false tends to hide actions.
+                invocation.ReturnValue <- DefaultReturnValue.create invocation.Method.ReturnType true
 
 
 type PickMembersServiceInterceptor(_logMessage) =
@@ -100,7 +133,17 @@ type PickMembersServiceInterceptor(_logMessage) =
                 invocation.ReturnValue <-
                     Activator.CreateInstance(pickMembersResultType, argMembers, argOptions, box true)
 
-            | _ -> NotImplementedException(string invocation.Method) |> raise
+            | "PickMembersAsync" ->
+                let argMembers = invocation.Arguments[1]
+                let argOptions = invocation.Arguments[2]
+
+                let returnType = invocation.Method.ReturnType
+                let innerResultType = returnType.GenericTypeArguments[0]
+                let pickMembersResult = Activator.CreateInstance(innerResultType, argMembers, argOptions, box true)
+                invocation.ReturnValue <- Task.fromResult(innerResultType, pickMembersResult)
+
+            | _ ->
+                invocation.ReturnValue <- DefaultReturnValue.create invocation.Method.ReturnType false
 
 
 type ExtractClassOptionsServiceInterceptor(_logMessage) =
@@ -178,7 +221,8 @@ type ExtractClassOptionsServiceInterceptor(_logMessage) =
                 let argOriginalType = invocation.Arguments[1] :?> INamedTypeSymbol
                 invocation.ReturnValue <- getExtractClassOptionsImpl argOriginalType
 
-            | _ -> NotImplementedException(string invocation.Method) |> raise
+            | _ ->
+                invocation.ReturnValue <- DefaultReturnValue.create invocation.Method.ReturnType false
 
 
 type ExtractInterfaceOptionsServiceInterceptor(logMessage) =
@@ -276,7 +320,8 @@ type MoveStaticMembersOptionsServiceInterceptor(_logMessage) =
 
                 invocation.ReturnValue <- msmOptions
 
-            | _ -> NotImplementedException(string invocation.Method) |> raise
+            | _ ->
+                invocation.ReturnValue <- DefaultReturnValue.create invocation.Method.ReturnType false
 
 
 type RemoteHostClientProviderInterceptor(_logMessage) =
@@ -293,7 +338,8 @@ type RemoteHostClientProviderInterceptor(_logMessage) =
 
                 invocation.ReturnValue <- Task.fromResult (remoteHostClientType, null)
 
-            | _ -> NotImplementedException(string invocation.Method) |> raise
+            | _ ->
+                invocation.ReturnValue <- DefaultReturnValue.create invocation.Method.ReturnType false
 
 
 type WorkspaceServicesInterceptor() =
@@ -303,15 +349,23 @@ type WorkspaceServicesInterceptor() =
         member __.Intercept(invocation: IInvocation) =
             invocation.Proceed()
 
-            if invocation.Method.Name = "GetService" && invocation.ReturnValue = null then
-                let updatedReturnValue =
-                    let serviceType = invocation.GenericArguments[0]
-                    let generator = ProxyGenerator()
+            // Provide deterministic, headless implementations for a small set of Roslyn workspace services.
+            // These services often have UI-backed default implementations (or option-gated behavior) that
+            // varies by environment; for an LSP server we always want a stable, non-interactive behavior.
+            if invocation.Method.Name = "GetService" then
+                let serviceType = invocation.GenericArguments[0]
+                let generator = ProxyGenerator()
 
+                let forcedReturnValue =
                     match serviceType.FullName with
                     | "Microsoft.CodeAnalysis.Options.ILegacyGlobalOptionsWorkspaceService" ->
-                        let interceptor = LegacyWorkspaceOptionServiceInterceptor()
-                        generator.CreateInterfaceProxyWithoutTarget(serviceType, interceptor)
+                        // Prefer the real service when available; otherwise provide a permissive headless
+                        // implementation to keep refactorings stable across environments.
+                        if invocation.ReturnValue <> null then
+                            invocation.ReturnValue
+                        else
+                            let interceptor = LegacyWorkspaceOptionServiceInterceptor()
+                            generator.CreateInterfaceProxyWithoutTarget(serviceType, interceptor)
 
                     | "Microsoft.CodeAnalysis.PickMembers.IPickMembersService" ->
                         let interceptor = PickMembersServiceInterceptor()
@@ -336,14 +390,15 @@ type WorkspaceServicesInterceptor() =
                     | "Microsoft.CodeAnalysis.SourceGeneratorTelemetry.ISourceGeneratorTelemetryCollectorWorkspaceService"
                     | "Microsoft.CodeAnalysis.CodeRefactorings.PullMemberUp.Dialog.IPullMemberUpOptionsService"
                     | "Microsoft.CodeAnalysis.Packaging.IPackageInstallerService" ->
-                        // supress "GetService failed" messages for these services
+                        // suppress "GetService failed" messages for these services
                         null
 
                     | _ ->
-                        logger.LogDebug("GetService failed for {serviceType}", serviceType.FullName)
-                        null
+                        if invocation.ReturnValue = null then
+                            logger.LogDebug("GetService failed for {serviceType}", serviceType.FullName)
+                        invocation.ReturnValue
 
-                invocation.ReturnValue <- updatedReturnValue
+                invocation.ReturnValue <- forcedReturnValue
 
 
 type CSharpLspHostServices() =

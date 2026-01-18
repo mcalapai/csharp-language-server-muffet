@@ -21,6 +21,27 @@
     <NoWarn>$(NoWarn);NU1902;NU1903</NoWarn>
   </PropertyGroup>
 
+  <!--
+    dotnet pack with PackAsTool runs a publish pipeline which can attempt to copy
+    $(IntermediateOutputPath)$(AssemblyName).dll.config, but that file may not be present even
+    when the build output contains $(TargetDir)$(AssemblyName).dll.config.
+
+    Ensure the expected intermediate file exists before publish copy targets run.
+  -->
+  <Target Name="EnsureToolDllConfigForPublish"
+          BeforeTargets="_CopyResolvedFilesToPublishPreserveNewest;_CopyResolvedFilesToPublishAlways"
+          Condition="'$(PackAsTool)' == 'true'">
+    <PropertyGroup>
+      <_ToolDllConfig_Source>$(TargetDir)$(AssemblyName).dll.config</_ToolDllConfig_Source>
+      <_ToolDllConfig_Dest>$(IntermediateOutputPath)$(AssemblyName).dll.config</_ToolDllConfig_Dest>
+    </PropertyGroup>
+
+    <Copy SourceFiles="$(_ToolDllConfig_Source)"
+          DestinationFiles="$(_ToolDllConfig_Dest)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_ToolDllConfig_Source)') and !Exists('$(_ToolDllConfig_Dest)')" />
+  </Target>
+
   <ItemGroup>
     <Compile Include="Logging.fs" />
     <Compile Include="Util.fs" />
