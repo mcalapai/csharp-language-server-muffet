@@ -420,6 +420,10 @@ type CSharpLspServer(lspClient: CSharpLspClient, settings: ServerSettings) =
         override __.CSharpMetadata p =
             p |> withReadOnlyContext "csharp/metadata" CSharpMetadata.handle
 
+        override __.MuffetSemanticSnapshotBulk p =
+            p
+            |> withReadWriteContext "muffet/semanticSnapshotBulk" MuffetSemanticSnapshotBulk.handle
+
 module Server =
     let logger = Logging.getLoggerByName "LSP"
 
@@ -451,7 +455,8 @@ module Server =
             : ServerRequestHandling<ICSharpLspServer> =
             serverRequestHandling run
 
-        [ "csharp/metadata", requestHandling (fun s p -> s.CSharpMetadata p) ]
+        [ "csharp/metadata", requestHandling (fun s p -> s.CSharpMetadata p)
+          "muffet/semanticSnapshotBulk", requestHandling (fun s p -> s.MuffetSemanticSnapshotBulk p) ]
         |> Map.ofList
 
     // TODO:

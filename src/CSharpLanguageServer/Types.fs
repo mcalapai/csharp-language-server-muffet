@@ -51,10 +51,26 @@ type CSharpMetadataParams =
 
 type CSharpMetadataResponse = CSharpMetadataInformation
 
+type MuffetSemanticSnapshotBulkOptions =
+    { maxTargetsPerSite: int option
+      deadlineMs: int option }
+
+type MuffetSemanticSnapshotBulkParams =
+    { requestPath: string
+      responsePath: string
+      options: MuffetSemanticSnapshotBulkOptions option }
+
+type MuffetSemanticSnapshotBulkResponse =
+    { files: int
+      errors: int
+      wallMs: int
+      error: string option }
+
 [<Interface>]
 type ICSharpLspServer =
     inherit ILspServer
     abstract CSharpMetadata: CSharpMetadataParams -> AsyncLspResult<CSharpMetadataResponse option>
+    abstract MuffetSemanticSnapshotBulk: MuffetSemanticSnapshotBulkParams -> AsyncLspResult<MuffetSemanticSnapshotBulkResponse>
 
 [<Interface>]
 type ICSharpLspClient =
